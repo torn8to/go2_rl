@@ -54,7 +54,8 @@ def get_train_cfg(exp_name, max_iterations):
         "save_interval": 100,
         "runner_class_name": "OnPolicyRunner",
         "seed": 1,
-        #"logger":"wandb"
+        "logger":"wandb",
+        "wandb_project":"rl locomotion"
     }
 
     return train_cfg_dict
