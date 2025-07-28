@@ -8,6 +8,7 @@ dependencies = [
     "mujoco>=3.3.4",
     "numpy==2.2",
     "pynput>=1.8.1",
+    "rsl-rl-lib==2.2.4",
     "tensorboard>=2.20.0",
     "wandb>=0.21.0",
 ]

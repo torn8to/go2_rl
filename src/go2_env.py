@@ -1,27 +1,15 @@
-import random
 import torch
 import math
-from rsl_rl.env import VecEnv
 import genesis as gs
 from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
-from tensordict import TensorDict
 
 
 def gs_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
 
-def gs_rand_gaussian(mean, min, max, n_std, shape, device):
-    mean_tensor = mean.expand(shape).to(device)
-    std_tensor = torch.full(shape, (max - min)/ 4.0 * n_std, device=device)
-    return torch.clamp(torch.normal(mean_tensor, std_tensor), min, max)
 
-def gs_additive(base, increment):
-    return base + increment
-
-
-
-class Go2Env(VecEnv):
-    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, device="cuda", add_camera = False):
+class Go2Env:
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, device="cuda"):
         self.device = torch.device(device)
 
         self.num_envs = num_envs
@@ -38,7 +26,6 @@ class Go2Env(VecEnv):
         self.obs_cfg = obs_cfg
         self.reward_cfg = reward_cfg
         self.command_cfg = command_cfg
-        self.cfg = {"env": env_cfg, "obs": obs_cfg, "reward": reward_cfg, "command": command_cfg}
 
         self.obs_scales = obs_cfg["obs_scales"]
         self.reward_scales = reward_cfg["reward_scales"]
@@ -48,18 +35,17 @@ class Go2Env(VecEnv):
             sim_options=gs.options.SimOptions(dt=self.dt, substeps=2),
             viewer_options=gs.options.ViewerOptions(
                 max_FPS=int(0.5 / self.dt),
-                camera_pos=(3.5, 0.5, 2.5),
+                camera_pos=(2.0, 0.0, 2.5),
                 camera_lookat=(0.0, 0.0, 0.5),
                 camera_fov=40,
             ),
-            vis_options=gs.options.VisOptions(n_rendered_envs=num_envs, show_world_frame=False),
+            vis_options=gs.options.VisOptions(rendered_envs_idx=list(range(1))),
             rigid_options=gs.options.RigidOptions(
                 dt=self.dt,
                 constraint_solver=gs.constraint_solver.Newton,
                 enable_collision=True,
                 enable_joint_limit=True,
             ),
-            renderer=gs.renderers.Rasterizer(),
             show_viewer=show_viewer,
         )
 
@@ -77,26 +63,16 @@ class Go2Env(VecEnv):
                 quat=self.base_init_quat.cpu().numpy(),
             ),
         )
-        
-        # self.cam_0 : gs.Camera = None
-        if add_camera:
-            self.cam_0 = self.scene.add_camera(
-                res=(1920, 1080),
-                pos=(2.5, 0.5, 3.5),
-                lookat=(0, 0, 0.5),
-                fov=40,
-                GUI=True,
-            )
 
         # build
-        self.scene.build(n_envs=num_envs, env_spacing=(1.0, 1.0))
+        self.scene.build(n_envs=num_envs)
 
         # names to indices
-        self.motor_dofs = [self.robot.get_joint(name).dof_idx_local for name in self.env_cfg["dof_names"]]
+        self.motors_dof_idx = [self.robot.get_joint(name).dof_start for name in self.env_cfg["joint_names"]]
 
         # PD control parameters
-        self.robot.set_dofs_kp([self.env_cfg["kp"]] * self.num_actions, self.motor_dofs)
-        self.robot.set_dofs_kv([self.env_cfg["kd"]] * self.num_actions, self.motor_dofs)
+        self.robot.set_dofs_kp([self.env_cfg["kp"]] * self.num_actions, self.motors_dof_idx)
+        self.robot.set_dofs_kv([self.env_cfg["kd"]] * self.num_actions, self.motors_dof_idx)
 
         # prepare reward functions and multiply reward scales by dt
         self.reward_functions, self.episode_sums = dict(), dict()
@@ -118,7 +94,7 @@ class Go2Env(VecEnv):
         self.episode_length_buf = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_int)
         self.commands = torch.zeros((self.num_envs, self.num_commands), device=self.device, dtype=gs.tc_float)
         self.commands_scale = torch.tensor(
-            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"], self.obs_scales["ang_vel"], self.obs_scales["lin_vel"], self.obs_scales["lin_vel"]] ,
+            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"], self.obs_scales["ang_vel"]],
             device=self.device,
             dtype=gs.tc_float,
         )
@@ -130,66 +106,23 @@ class Go2Env(VecEnv):
         self.base_pos = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.base_quat = torch.zeros((self.num_envs, 4), device=self.device, dtype=gs.tc_float)
         self.default_dof_pos = torch.tensor(
-            [self.env_cfg["default_joint_angles"][name] for name in self.env_cfg["dof_names"]],
+            [self.env_cfg["default_joint_angles"][name] for name in self.env_cfg["joint_names"]],
             device=self.device,
             dtype=gs.tc_float,
         )
-        
-        self.jump_toggled_buf = torch.zeros((self.num_envs,), device=self.device)
-        self.jump_target_height = torch.zeros((self.num_envs,), device=self.device)
-        
         self.extras = dict()  # extra information for logging
+        self.extras["observations"] = dict()
 
     def _resample_commands(self, envs_idx):
-        # self.commands[envs_idx, 0] = gs_rand_float(*self.command_cfg["lin_vel_x_range"], (len(envs_idx),), self.device)
-        # self.commands[envs_idx, 1] = gs_rand_float(*self.command_cfg["lin_vel_y_range"], (len(envs_idx),), self.device)
-        # self.commands[envs_idx, 2] = gs_rand_float(*self.command_cfg["ang_vel_range"], (len(envs_idx),), self.device)
-        # self.commands[envs_idx, 0] =  gs_additive(self.last_actions[envs_idx, 0], self.command_cfg["lin_vel_x_range"][0] + (self.command_cfg["lin_vel_x_range"][1] - self.command_cfg["lin_vel_x_range"][0]) * torch.sin(2 * math.pi * self.episode_length_buf[envs_idx] / 300))
-        self.commands[envs_idx, 0] =  gs_rand_gaussian(self.last_actions[envs_idx, 0], *self.command_cfg["lin_vel_x_range"],  2.0, (len(envs_idx),), self.device)
-        self.commands[envs_idx, 1] =  gs_rand_gaussian(self.last_actions[envs_idx, 1], *self.command_cfg["lin_vel_y_range"],  2.0, (len(envs_idx),), self.device)
-        self.commands[envs_idx, 2] =  gs_rand_gaussian(self.last_actions[envs_idx, 2], *self.command_cfg["ang_vel_range"],  2.0, (len(envs_idx),), self.device)
-        self.commands[envs_idx, 3] =  gs_rand_gaussian(self.last_actions[envs_idx, 3], *self.command_cfg["height_range"],  0.5,(len(envs_idx),), self.device)
-        self.commands[envs_idx, 4] = 0.0
-        
-        # scale lin_vel and ang_vel proportionally to the height difference between the target and default height
-        height_diff_scale = 0.5 + abs(self.commands[envs_idx, 3] - self.reward_cfg["base_height_target"])/ (self.command_cfg["height_range"][1] - self.reward_cfg["base_height_target"]) * 0.5
-        self.commands[envs_idx, 0] *= height_diff_scale
-        self.commands[envs_idx, 1] *= height_diff_scale
-        self.commands[envs_idx, 2] *= height_diff_scale
-        
-    def _sample_commands(self, envs_idx):
         self.commands[envs_idx, 0] = gs_rand_float(*self.command_cfg["lin_vel_x_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 1] = gs_rand_float(*self.command_cfg["lin_vel_y_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 2] = gs_rand_float(*self.command_cfg["ang_vel_range"], (len(envs_idx),), self.device)
-        self.commands[envs_idx, 3] = gs_rand_float(*self.command_cfg["height_range"], (len(envs_idx),), self.device)
-        self.commands[envs_idx, 4] = 0.0
-        
-        # scale lin_vel and ang_vel proportionally to the height difference between the target and default height
-        height_diff_scale = 0.5 + abs(self.commands[envs_idx, 3] - self.reward_cfg["base_height_target"])/ (self.command_cfg["height_range"][1] - self.reward_cfg["base_height_target"]) * 0.5
-        self.commands[envs_idx, 0] *= height_diff_scale
-        self.commands[envs_idx, 1] *= height_diff_scale
-        self.commands[envs_idx, 2] *= height_diff_scale
-    
-    def _sample_jump_commands(self, envs_idx):
-        self.commands[envs_idx, 4] = gs_rand_float(*self.command_cfg["jump_range"], (len(envs_idx),), self.device)
-        
+
     def step(self, actions):
-        """Apply input action to the environment.
-
-        Args:
-            actions (torch.Tensor): Input actions to apply. Shape: (num_envs, num_actions)
-
-        Returns:
-            observations (TensorDict): Observations from the environment.
-            rewards (torch.Tensor): Rewards from the environment. Shape: (num_envs,)
-            dones (torch.Tensor): Done flags from the environment. Shape: (num_envs,)
-            extras (dict): Extra information from the environment.
-        """
-        is_train = True  # Default to training mode
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
         exec_actions = self.last_actions if self.simulate_action_latency else self.actions
         target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos
-        self.robot.control_dofs_position(target_dof_pos, self.motor_dofs)
+        self.robot.control_dofs_position(target_dof_pos, self.motors_dof_idx)
         self.scene.step()
 
         # update buffers
@@ -197,51 +130,36 @@ class Go2Env(VecEnv):
         self.base_pos[:] = self.robot.get_pos()
         self.base_quat[:] = self.robot.get_quat()
         self.base_euler = quat_to_xyz(
-            transform_quat_by_quat(torch.ones_like(self.base_quat) * self.inv_base_init_quat, self.base_quat)
+            transform_quat_by_quat(torch.ones_like(self.base_quat) * self.inv_base_init_quat, self.base_quat),
+            rpy=True,
+            degrees=True,
         )
         inv_base_quat = inv_quat(self.base_quat)
         self.base_lin_vel[:] = transform_by_quat(self.robot.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.robot.get_ang(), inv_base_quat)
         self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
-        self.dof_pos[:] = self.robot.get_dofs_position(self.motor_dofs)
-        self.dof_vel[:] = self.robot.get_dofs_velocity(self.motor_dofs)
+        self.dof_pos[:] = self.robot.get_dofs_position(self.motors_dof_idx)
+        self.dof_vel[:] = self.robot.get_dofs_velocity(self.motors_dof_idx)
 
-        # resample commands, it is a variable that holds the indices of environments that need to be resampled or reset. 
+        # resample commands
         envs_idx = (
             (self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt) == 0)
             .nonzero(as_tuple=False)
-            .flatten()
+            .reshape((-1,))
         )
-        if is_train:
-            # self._resample_commands(all_envs_idx)
-            self._sample_commands(envs_idx)
-            # Idxs with probability of 5% to sample random commands
-            ranomd_idxs_1 = torch.randperm(self.num_envs)[:int(self.num_envs * 0.05)]
-            self._sample_commands(ranomd_idxs_1)
-            
-            random_idxs_2 = torch.randperm(self.num_envs)[:int(self.num_envs * 0.05)]
-            self._sample_jump_commands(random_idxs_2)
-            
-        # Update jump_toggled_buf if command 4 goes from 0 -> non-zero
-        jump_cmd_now = (self.commands[:, 4] > 0.0).float()
-        toggle_mask = ((self.jump_toggled_buf == 0.0) & (jump_cmd_now > 0.0)).float()
-        self.jump_toggled_buf += toggle_mask * self.reward_cfg["jump_reward_steps"]  # stay 'active' for n steps, for example
-        self.jump_toggled_buf = torch.clamp(self.jump_toggled_buf - 1.0, min=0.0)
-        # Update jump_target_height if command 4 goes from 0 -> non-zero
-        self.jump_target_height = torch.where(jump_cmd_now > 0.0, self.commands[:, 4], self.jump_target_height)
-        
-        # print(f'jump_toggled_buf: {self.jump_toggled_buf}, jump_target_height: {self.jump_target_height}, commands: {self.commands}')
+        self._resample_commands(envs_idx)
+
         # check termination and reset
         self.reset_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf |= torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]
         self.reset_buf |= torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"]
 
-        time_out_idx = (self.episode_length_buf > self.max_episode_length).nonzero(as_tuple=False).flatten()
+        time_out_idx = (self.episode_length_buf > self.max_episode_length).nonzero(as_tuple=False).reshape((-1,))
         self.extras["time_outs"] = torch.zeros_like(self.reset_buf, device=self.device, dtype=gs.tc_float)
         self.extras["time_outs"][time_out_idx] = 1.0
 
-        self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten())    
-        
+        self.reset_idx(self.reset_buf.nonzero(as_tuple=False).reshape((-1,)))
+
         # compute reward
         self.rew_buf[:] = 0.0
         for name, reward_func in self.reward_functions.items():
@@ -254,40 +172,26 @@ class Go2Env(VecEnv):
             [
                 self.base_ang_vel * self.obs_scales["ang_vel"],  # 3
                 self.projected_gravity,  # 3
-                self.commands * self.commands_scale,  # 5
+                self.commands * self.commands_scale,  # 3
                 (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 12
                 self.dof_vel * self.obs_scales["dof_vel"],  # 12
                 self.actions,  # 12
-                (self.jump_toggled_buf / self.reward_cfg["jump_reward_steps"]).unsqueeze(-1),  # 1
             ],
             axis=-1,
         )
 
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
-        
-        # Reset jump command
-        self.commands[:, 4] = 0.0
 
-        # Create TensorDict for observations
-        observations = TensorDict({"policy": self.obs_buf}, batch_size=(self.num_envs,), device=self.device)
+        self.extras["observations"]["critic"] = self.obs_buf
 
-        return observations, self.rew_buf, self.reset_buf, self.extras
+        return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
 
     def get_observations(self):
-        """Return the current observations.
-
-        Returns:
-            observations (TensorDict): Observations from the environment.
-        """
-        return TensorDict({"policy": self.obs_buf}, batch_size=(self.num_envs,), device=self.device)
+        self.extras["observations"]["critic"] = self.obs_buf
+        return self.obs_buf, self.extras
 
     def get_privileged_observations(self):
-        """Return privileged observations if available.
-
-        Returns:
-            None: This environment doesn't use privileged observations.
-        """
         return None
 
     def reset_idx(self, envs_idx):
@@ -299,7 +203,7 @@ class Go2Env(VecEnv):
         self.dof_vel[envs_idx] = 0.0
         self.robot.set_dofs_position(
             position=self.dof_pos[envs_idx],
-            dofs_idx_local=self.motor_dofs,
+            dofs_idx_local=self.motors_dof_idx,
             zero_velocity=True,
             envs_idx=envs_idx,
         )
@@ -318,8 +222,6 @@ class Go2Env(VecEnv):
         self.last_dof_vel[envs_idx] = 0.0
         self.episode_length_buf[envs_idx] = 0
         self.reset_buf[envs_idx] = True
-        self.jump_toggled_buf[envs_idx] = 0.0
-        self.jump_target_height[envs_idx] = 0.0
 
         # fill extras
         self.extras["episode"] = {}
@@ -329,25 +231,12 @@ class Go2Env(VecEnv):
             )
             self.episode_sums[key][envs_idx] = 0.0
 
-        self._sample_commands(envs_idx)
-        
-        # set target height command to default height
-        self.commands[envs_idx, 3] = self.reward_cfg["base_height_target"]
-        
+        self._resample_commands(envs_idx)
 
     def reset(self):
-        """Reset all environments.
-
-        Returns:
-            observations (TensorDict): Initial observations after reset.
-            None: No privileged observations available.
-        """
         self.reset_buf[:] = True
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        
-        # Return observations as TensorDict
-        observations = TensorDict({"policy": self.obs_buf}, batch_size=(self.num_envs,), device=self.device)
-        return observations, None
+        return self.obs_buf, None
 
     # ------------ reward functions----------------
     def _reward_tracking_lin_vel(self):
@@ -362,25 +251,23 @@ class Go2Env(VecEnv):
 
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
-        active_mask = (self.jump_toggled_buf < 0.01).float()
-        return active_mask * torch.square(self.base_lin_vel[:, 2])
+        return torch.square(self.base_lin_vel[:, 2])
 
     def _reward_action_rate(self):
         # Penalize changes in actions
-        active_mask = (self.jump_toggled_buf < 0.01).float()
-        return active_mask * torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+        return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
 
     def _reward_similar_to_default(self):
         # Penalize joint poses far away from default pose
-        active_mask = (self.jump_toggled_buf < 0.01).float()
-        return active_mask * torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
 
     def _reward_base_height(self):
         # Penalize base height away from target
-        # return torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
-        active_mask = (self.jump_toggled_buf < 0.01).float()
-        return active_mask * torch.square(self.base_pos[:, 2] - self.commands[:, 3])
-    
+        return torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
+
+
+
+    ''' 
     def _reward_jump_height_tracking(self):
         """Continuous reward for minimizing distance to target height during peak phase"""
         mask = ((self.jump_toggled_buf >= 0.3 * self.reward_cfg["jump_reward_steps"]) & 
@@ -408,3 +295,4 @@ class Go2Env(VecEnv):
         mask = (self.jump_toggled_buf >= 0.6 * self.reward_cfg["jump_reward_steps"])
         height_error = -torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
         return mask.float() * height_error 
+    '''
