@@ -101,13 +101,20 @@ def get_cfgs():
         "termination_if_roll_greater_than": 10,  # degree
         "termination_if_pitch_greater_than": 10,
         # base pose
-        "base_init_pos": [0.0, 0.0, 0.42],
+        "base_init_pos": [0.0, 0.0, 0.45],
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 20.0,
         "resampling_time_s": 4.0,
         "action_scale": 0.25,
         "simulate_action_latency": True,
         "clip_actions": 100.0,
+        "push_interval_s": 10.0,
+        "push_vel_range": [-1.0, 1.0],
+        # domain randomization
+        "lin_vel_shift_range": [-0.1, 0.1],
+        "ang_vel_shift_range": [-0.2, 0.2],
+        "terrain_type": "active_noisy", # "plane" or "active_noisy"
+        "terrain_noise_scale": 0.2,
         "logger":"wandb",
         "wandb_project":"rl locomotion"
     }
@@ -149,6 +156,7 @@ def main():
     parser.add_argument("-B", "--num_envs", type=int, default=2048)
     parser.add_argument("--max_iterations", type=int, default=15000)
     parser.add_argument("--device", type=str, default="cuda:0", help="device to use: 'cpu' or 'cuda:0'")
+    parser.add_argument("--disable_noise", action="store_true", default=False, help="Disable noisy terrain and use a flat plane instead")
     args = parser.parse_args()
 
     backend = gs.constants.backend.gpu if args.device.lower() == "cuda:0" else gs.constants.backend.cpu
@@ -157,6 +165,14 @@ def main():
 
     log_dir = f"logs/{args.exp_name}"
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
+    if args.disable_noise:
+        env_cfg["terrain_type"] = "plane"
+
+    if args.disable_push:
+        env_cfg["push_interval_s"] = 0.0
+
+    if args.
+    
     train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
     if args.ckpt >= 1:
         train_cfg["resume"] = True

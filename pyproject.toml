@@ -5,10 +5,18 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mujoco>=3.3.4",
+    "genesis-world",
     "numpy==2.2",
     "pynput>=1.8.1",
     "rsl-rl-lib==2.2.4",
     "tensorboard>=2.20.0",
     "wandb>=0.21.0",
 ]
+
+[tool.uv.workspace]
+members = [
+    "Genesis",
+]
+
+[tool.uv.sources]
+genesis-world = { workspace = true }

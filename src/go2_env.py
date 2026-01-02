@@ -48,9 +48,22 @@ class Go2Env:
             ),
             show_viewer=show_viewer,
         )
-
-        # add plain
-        self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
+        # add terrain type either plane or noisy
+        # noisy terrain
+        if self.env_cfg.get("terrain_type") == "active_noisy":
+             self.terrain = self.scene.add_entity(
+                gs.morphs.Terrain(
+                    n_subterrains=(20, 20),
+                    subterrain_size=(20, 20),
+                    pos=(0, 0, 0),
+                    horizontal_scale=0.25,
+                    vertical_scale= 0.001 ,
+                    subterrain_types="random_uniform_terrain",
+                    randomize=True
+                )
+             )
+        else:
+             self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
 
         # add robot
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=self.device)
@@ -64,8 +77,15 @@ class Go2Env:
             ),
         )
 
+        # random forces
+        self.push_interval_steps = int(self.env_cfg.get("push_interval_s", 5.0) / self.dt)
+        self.push_vel_range = self.env_cfg.get("push_vel_range", [-1.0, 1.0])
+        self.lin_vel_shift_range = self.env_cfg.get("lin_vel_shift_range", [-0.1, 0.1])
+        self.ang_vel_shift_range = self.env_cfg.get("ang_vel_shift_range", [-0.2, 0.2])
+
         # build
         self.scene.build(n_envs=num_envs)
+
 
         # names to indices
         self.motors_dof_idx = [self.robot.get_joint(name).dof_start for name in self.env_cfg["joint_names"]]
@@ -84,6 +104,8 @@ class Go2Env:
         # initialize buffers
         self.base_lin_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.base_ang_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_lin_vel_shift = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_ang_vel_shift = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.projected_gravity = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=gs.tc_float).repeat(
             self.num_envs, 1
@@ -141,6 +163,10 @@ class Go2Env:
         self.dof_pos[:] = self.robot.get_dofs_position(self.motors_dof_idx)
         self.dof_vel[:] = self.robot.get_dofs_velocity(self.motors_dof_idx)
 
+        # random pushes
+        if self.episode_length_buf[0] % self.push_interval_steps == 0:
+             self._apply_random_forces()
+
         # resample commands
         envs_idx = (
             (self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt) == 0)
@@ -170,7 +196,7 @@ class Go2Env:
         # compute observations
         self.obs_buf = torch.cat(
             [
-                self.base_ang_vel * self.obs_scales["ang_vel"],  # 3
+                (self.base_ang_vel + self.base_ang_vel_shift) * self.obs_scales["ang_vel"],  # 3
                 self.projected_gravity,  # 3
                 self.commands * self.commands_scale,  # 3
                 (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 12
@@ -232,6 +258,11 @@ class Go2Env:
             self.episode_sums[key][envs_idx] = 0.0
 
         self._resample_commands(envs_idx)
+        self._resample_shifts(envs_idx)
+
+    def _resample_shifts(self, envs_idx):
+        self.base_lin_vel_shift[envs_idx] = gs_rand_float(*self.lin_vel_shift_range, (len(envs_idx), 3), self.device)
+        self.base_ang_vel_shift[envs_idx] = gs_rand_float(*self.ang_vel_shift_range, (len(envs_idx), 3), self.device)
 
     def reset(self):
         self.reset_buf[:] = True
@@ -264,6 +295,14 @@ class Go2Env:
     def _reward_base_height(self):
         # Penalize base height away from target
         return torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
+
+    def _apply_random_forces(self):
+        random_vel = torch.rand((self.num_envs, 3), device=self.device) * (self.push_vel_range[1] - self.push_vel_range[0]) + self.push_vel_range[0]
+        random_vel[:, 2] = 0 # keep z velocity zero for now
+        
+        current_vel = self.robot.get_vel()
+        
+        self.robot.set_vel(current_vel + random_vel)
 
 
 
