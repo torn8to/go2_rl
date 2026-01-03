@@ -98,7 +98,7 @@ def main():
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
         show_viewer=True,
-        add_camera=True,
+        show_camera=True,
     )
     
     
@@ -119,15 +119,20 @@ def main():
     reset_jump_toggle_iter = 0
     images_buffer = []
     commands_buffer = []
+    print(env.cam_0)
     with torch.no_grad():
         while not stop:
-            
-            # env.cam_0.set_pose(lookat=env.base_pos.cpu().numpy()[0],)
-            # env.cam_0.set_pose(pos=env.base_pos.cpu().numpy()[0] + np.array([0.5, 0.0, 0.5]) * iter / 50, lookat=env.base_pos.cpu().numpy()[0],)
+            if env.cam_0 is not None: 
+                env.cam_0.set_pose(lookat=env.base_pos.cpu().numpy()[0],)
+                env.cam_0.set_pose(pos=env.base_pos.cpu().numpy()[0] + np.array([0.5, 0.0, 0.5]) * iter / 50, lookat=env.base_pos.cpu().numpy()[0])
                 
             actions = policy(obs)
-            # print(f"toggle_jump: {toggle_jump}, jump_height: {jump_height}")
-            env.commands = torch.tensor([[lin_x, lin_y, ang_z, base_height, toggle_jump*jump_height]], dtype=torch.float).to("cuda:0").repeat(num_envs, 1)
+
+
+            env.commands = torch.tensor([[lin_x, lin_y, ang_z, 
+            #base_height, 
+            #toggle_jump*jump_height
+            ]], dtype=torch.float).to("cuda:0").repeat(num_envs, 1)
             obs, rews, dones, infos = env.step(actions)
             # print(env.base_pos, env.base_lin_vel)
             if toggle_jump and reset_jump_toggle_iter == 0:
@@ -148,7 +153,10 @@ def main():
                 )
                 if args.save_data:
                     images_buffer.append(rgb)
-                    commands_buffer.append([lin_x, lin_y, ang_z, base_height, toggle_jump*jump_height])
+                    commands_buffer.append([lin_x, lin_y, ang_z, 
+                        base_height, 
+                        toggle_jump*jump_height
+                        ])
             
             if dones.any():
                 iter = 0
@@ -162,8 +170,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-"""
-# evaluation
-python examples/locomotion/go2_eval.py -e go2-walking -v --ckpt 100
-"""

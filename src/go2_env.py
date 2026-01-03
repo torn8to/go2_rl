@@ -9,7 +9,7 @@ def gs_rand_float(lower, upper, shape, device):
 
 
 class Go2Env:
-    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, device="cuda"):
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False,show_camera=False, device="cuda"):
         self.device = torch.device(device)
 
         self.num_envs = num_envs
@@ -83,8 +83,22 @@ class Go2Env:
         self.lin_vel_shift_range = self.env_cfg.get("lin_vel_shift_range", [-0.1, 0.1])
         self.ang_vel_shift_range = self.env_cfg.get("ang_vel_shift_range", [-0.2, 0.2])
 
+        # add camera
+        if show_camera:
+            self.cam_0 = self.scene.add_camera(
+                res=(640, 480),
+                pos=(3.0, 0.0, 2.5),
+                lookat=(0, 0, 0.5),
+                fov=60,
+                GUI=False
+            )
+        else:
+            self.cam_0 = None
         # build
         self.scene.build(n_envs=num_envs)
+
+        if self.cam_0 is not None:
+            self.cam_0.follow_entity(self.robot, smoothing=0.05)
 
 
         # names to indices
