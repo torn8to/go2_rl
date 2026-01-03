@@ -130,7 +130,7 @@ def get_cfgs():
     reward_cfg = {
         "tracking_sigma": 0.25,
         "base_height_target": 0.3,
-        "feet_height_target": 0.075,
+        "feet_height_target": 0.1,
         "reward_scales": {
             "tracking_lin_vel": 1.0,
             "tracking_ang_vel": 0.2,
@@ -141,10 +141,11 @@ def get_cfgs():
         },
     }
     command_cfg = {
-        "num_commands": 3,
-        "lin_vel_x_range": [0.5, 0.5],
-        "lin_vel_y_range": [0, 0],
-        "ang_vel_range": [0, 0],
+        "num_commands": 4,
+        "lin_vel_x_range": [-1.0, 1.0],
+        "lin_vel_y_range": [0.5, 0.5],
+        "ang_vel_range": [-0.3, 0.3],
+        "height_range": [0.2 , 0.4]
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg
@@ -154,7 +155,7 @@ def main():
     parser.add_argument("-e", "--exp_name", type=str, default="go2-walking")
     parser.add_argument("-c", "--ckpt", type=int, default=-1)
     parser.add_argument("-B", "--num_envs", type=int, default=2048)
-    parser.add_argument("--max_iterations", type=int, default=15000)
+    parser.add_argument("--max_iterations", type=int, default=1500)
     parser.add_argument("--device", type=str, default="cuda:0", help="device to use: 'cpu' or 'cuda:0'")
     parser.add_argument("--disable_noise", action="store_true", default=False, help="Disable noisy terrain and use a flat plane instead")
     args = parser.parse_args()
@@ -168,18 +169,15 @@ def main():
     if args.disable_noise:
         env_cfg["terrain_type"] = "plane"
 
-    if args.disable_push:
-        env_cfg["push_interval_s"] = 0.0
+    env_cfg["push_interval_s"] = 0.0
 
-    if args.
-    
     train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
     if args.ckpt >= 1:
         train_cfg["resume"] = True
         resume_path=os.path.join("go2-walking-models",f"model_{args.ckpt}.pt")
-        
-    if os.path.exists(log_dir):
-        shutil.rmtree(log_dir)
+    else:
+        if os.path.exists(log_dir):
+            shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
 
     env = Go2Env(
