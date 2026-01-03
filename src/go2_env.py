@@ -53,11 +53,11 @@ class Go2Env:
         if self.env_cfg.get("terrain_type") == "active_noisy":
              self.terrain = self.scene.add_entity(
                 gs.morphs.Terrain(
-                    n_subterrains=(20, 20),
-                    subterrain_size=(20, 20),
-                    pos=(0, 0, 0),
+                    n_subterrains=(3, 3),
+                    subterrain_size=(10, 10),
+                    pos=(-15, -15, 0),
                     horizontal_scale=0.25,
-                    vertical_scale= 0.001 ,
+                    vertical_scale=0.005 ,
                     subterrain_types="random_uniform_terrain",
                     randomize=True
                 )

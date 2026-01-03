@@ -73,6 +73,7 @@ def main():
     parser.add_argument("-e", "--exp_name", type=str, default="go2-walking")
     parser.add_argument("--ckpt", type=int, default=900)
     parser.add_argument("--save-data", type=bool, default=False)
+    parser.add_argument("--stepping-stones", type=bool, default=True)
     args = parser.parse_args()
 
     gs.init(
@@ -82,7 +83,6 @@ def main():
 
     log_dir = f"logs/{args.exp_name}" if args.model_directory == "" else f"{args.model_directory}"
     env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(open(f"logs/{args.exp_name}/cfgs.pkl", "rb"))
-    # env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(open(f"genesis/logs/{args.exp_name}/cfgs.pkl", "rb"))
     train_cfg["policy"]["class_name"] = "ActorCritic"
     train_cfg["algorithm"]["class_name"] = "PPO"
     pprint.pp(train_cfg) 
@@ -90,6 +90,8 @@ def main():
 
     env_cfg["termination_if_roll_greater_than"] =  50  # degree
     env_cfg["termination_if_pitch_greater_than"] = 50  # degree
+    if args.stepping_stones:
+        env_cfg["terrain_type"] = "active_noisy"
     num_envs = 1
     env = Go2Env(
         num_envs=num_envs,
