@@ -1,7 +1,9 @@
 import torch
 import math
+import numpy as np
 import genesis as gs
 from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
+import gstaichi as ti
 
 
 def gs_rand_float(lower, upper, shape, device):
@@ -17,6 +19,7 @@ class Go2Env:
         self.num_privileged_obs = None
         self.num_actions = env_cfg["num_actions"]
         self.num_commands = command_cfg["num_commands"]
+        self.contact_links = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
 
         self.simulate_action_latency = True  # there is a 1 step latency on real robot
         self.dt = 0.02  # control frequency on real robot is 50hz
@@ -53,7 +56,7 @@ class Go2Env:
         if self.env_cfg.get("terrain_type") == "active_noisy":
              self.terrain = self.scene.add_entity(
                 gs.morphs.Terrain(
-                    n_subterrains=(3, 3),
+                    n_subterrains=(5, 5),
                     subterrain_size=(10, 10),
                     pos=(-15, -15, 0),
                     horizontal_scale=0.25,
@@ -63,7 +66,7 @@ class Go2Env:
                 )
              )
         else:
-             self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
+             self.terrain = self.scene.add_entity(gs.morphs.Plane(pos=(0, 0, 0), fixed=True))
 
         # add robot
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=self.device)
@@ -74,8 +77,17 @@ class Go2Env:
                 file="urdf/go2/urdf/go2.urdf",
                 pos=self.base_init_pos.cpu().numpy(),
                 quat=self.base_init_quat.cpu().numpy(),
+                links_to_keep=self.contact_links,
             ),
         )
+        self.contact_sensors = []
+        for link in self.contact_links:
+            if link in self.robot.links:
+                self.contact_sensors.append(self.scene.add_sensor(gs.sensors.ContactForce(
+                    entity_idx=self.robot.idx,
+                    link_idx_local=self.robot.get_link(link).idx_local,
+                    draw_debug=True,
+                )))
 
         # random forces
         self.push_interval_steps = int(self.env_cfg.get("push_interval_s", 5.0) / self.dt)
@@ -99,7 +111,6 @@ class Go2Env:
 
         if self.cam_0 is not None:
             self.cam_0.follow_entity(self.robot, smoothing=0.05)
-
 
         # names to indices
         self.motors_dof_idx = [self.robot.get_joint(name).dof_start for name in self.env_cfg["joint_names"]]
@@ -153,6 +164,45 @@ class Go2Env:
         self.commands[envs_idx, 0] = gs_rand_float(*self.command_cfg["lin_vel_x_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 1] = gs_rand_float(*self.command_cfg["lin_vel_y_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 2] = gs_rand_float(*self.command_cfg["ang_vel_range"], (len(envs_idx),), self.device)
+        if "height_range" in self.command_cfg.keys():
+            self.commands[envs_idx, 3] = gs_rand_float(*self.command_cfg["height_range"], (len(envs_idx),), self.device)
+        else:
+            self.commands[envs_idx, 3] = torch.ones(size=len(envs_idx), device = self.device) * 0.3
+
+    def sample_contacts(self, envs_idx=None) -> torch.Tensor:
+        """
+        Sample contact information from all contact sensors across environments.
+        
+        Parameters
+        ----------
+        envs_idx : int, list, or None, optional
+            Environment indices to query. If None, queries all environments.
+            Defaults to None.
+        
+        Returns
+        -------
+        torch.Tensor, shape (n_envs, n_links)
+            Boolean tensor indicating contact for each link in each environment.
+            True means the link is in contact, False means no contact.
+            Order matches self.contact_links: [FR_foot, FL_foot, RR_foot, RL_foot]
+        """
+        if len(self.contact_sensors) == 0:
+            # No contact sensors, return zeros
+            n_envs = self.num_envs if envs_idx is None else len(envs_idx) if isinstance(envs_idx, (list, tuple)) else 1
+            return torch.zeros((n_envs, len(self.contact_links)), device=self.device, dtype=gs.tc_float)
+        
+        contact_data = []
+        for sensor in self.contact_sensors:
+            contact = sensor.read(envs_idx=envs_idx)
+            if not isinstance(contact, torch.Tensor):
+                contact = torch.tensor(contact, device=self.device, dtype=gs.tc_float) * 1.0
+            if contact.dim() == 0:
+                contact = contact.unsqueeze(0)
+            contact_data.append(contact)
+        
+        contacts = torch.stack(contact_data, dim=-1)
+        return contacts
+
 
     def step(self, actions):
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
@@ -176,6 +226,8 @@ class Go2Env:
         self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
         self.dof_pos[:] = self.robot.get_dofs_position(self.motors_dof_idx)
         self.dof_vel[:] = self.robot.get_dofs_velocity(self.motors_dof_idx)
+        # Sample contact information (optional - can be called when needed)
+        self.contact_buffers = self.sample_contacts()
 
         # random pushes
         if self.episode_length_buf[0] % self.push_interval_steps == 0:
@@ -207,12 +259,15 @@ class Go2Env:
             self.rew_buf += rew
             self.episode_sums[name] += rew
 
+
+
         # compute observations
         self.obs_buf = torch.cat(
             [
                 (self.base_ang_vel + self.base_ang_vel_shift) * self.obs_scales["ang_vel"],  # 3
                 self.projected_gravity,  # 3
-                self.commands * self.commands_scale,  # 3
+                self.commands * self.commands_scale,  # 4
+                self.contact_sensors * self.obs_scales["contact_sensor"], # 4
                 (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 12
                 self.dof_vel * self.obs_scales["dof_vel"],  # 12
                 self.actions,  # 12
@@ -226,6 +281,7 @@ class Go2Env:
         self.extras["observations"]["critic"] = self.obs_buf
 
         return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
+
 
     def get_observations(self):
         self.extras["observations"]["critic"] = self.obs_buf
@@ -283,7 +339,6 @@ class Go2Env:
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
         return self.obs_buf, None
 
-    # ------------ reward functions----------------
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
@@ -313,39 +368,125 @@ class Go2Env:
     def _apply_random_forces(self):
         random_vel = torch.rand((self.num_envs, 3), device=self.device) * (self.push_vel_range[1] - self.push_vel_range[0]) + self.push_vel_range[0]
         random_vel[:, 2] = 0 # keep z velocity zero for now
-        
         current_vel = self.robot.get_vel()
-        
         self.robot.set_vel(current_vel + random_vel)
 
-
-
-    ''' 
-    def _reward_jump_height_tracking(self):
-        """Continuous reward for minimizing distance to target height during peak phase"""
-        mask = ((self.jump_toggled_buf >= 0.3 * self.reward_cfg["jump_reward_steps"]) & 
-                (self.jump_toggled_buf < 0.6 * self.reward_cfg["jump_reward_steps"]))
-        target_height = self.jump_target_height
-        height_diff = torch.exp(-torch.square(self.base_pos[:, 2] - target_height))
-        return mask.float() * height_diff
-
-    def _reward_jump_height_achievement(self):
-        """Binary reward for reaching close to target height during peak phase"""
-        mask = ((self.jump_toggled_buf >= 0.3 * self.reward_cfg["jump_reward_steps"]) & 
-                (self.jump_toggled_buf < 0.6 * self.reward_cfg["jump_reward_steps"]))
-        target_height = self.jump_target_height
-        binary_bonus = (torch.abs(self.base_pos[:, 2] - target_height) < 0.2).float()
-        return mask.float() * binary_bonus
-
-    def _reward_jump_speed(self):
-        """Reward for upward velocity during peak phase"""
-        mask = ((self.jump_toggled_buf >= 0.3 * self.reward_cfg["jump_reward_steps"]) & 
-                (self.jump_toggled_buf < 0.6 * self.reward_cfg["jump_reward_steps"]))
-        return mask.float() * torch.exp(self.base_lin_vel[:, 2]) * 0.2
-
-    def _reward_jump_landing(self):
-        """Penalty for deviation from base height during landing"""
-        mask = (self.jump_toggled_buf >= 0.6 * self.reward_cfg["jump_reward_steps"])
-        height_error = -torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
-        return mask.float() * height_error 
-    '''
+    def query_terrain_heights(self, x_min, x_max, y_min, y_max, voxel_size=0.1):
+        """
+        Query terrain heights over a rectangular region.
+        
+        This function samples the terrain height field over a specified rectangular
+        region using bilinear interpolation. If no terrain exists (e.g., using a
+        flat plane), it returns zeros.
+        
+        Parameters
+        ----------
+        x_min, x_max : float
+            X-axis bounds of the query region in world coordinates (meters)
+        y_min, y_max : float
+            Y-axis bounds of the query region in world coordinates (meters)
+        voxel_size : float, optional
+            Size of each voxel in meters. If None, uses the terrain's horizontal_scale.
+            If specified, the region will be sampled at this resolution.
+        
+        Returns
+        -------
+        heights : torch.Tensor, shape (nx, ny)
+            Height values in world coordinates (meters) for each voxel in the region
+        x_coords : torch.Tensor, shape (nx,)
+            X coordinates of each voxel center
+        y_coords : torch.Tensor, shape (ny,)
+            Y coordinates of each voxel center
+        
+        Example
+        -------
+        >>> # Query a 2m x 2m region around the origin with 0.1m voxels
+        >>> heights, x_coords, y_coords = env.query_terrain_heights(
+        ...     x_min=-1.0, x_max=1.0,
+        ...     y_min=-1.0, y_max=1.0,
+        ...     voxel_size=0.1
+        ... )
+        >>> # heights[i, j] gives the height at position (x_coords[i], y_coords[j])
+        """
+        if not hasattr(self, 'terrain') or self.terrain is None:
+            # If no terrain, return flat plane at z=0
+            if voxel_size is None:
+                voxel_size = 0.25
+            nx = int((x_max - x_min) / voxel_size) + 1
+            ny = int((y_max - y_min) / voxel_size) + 1
+            x_coords = torch.linspace(x_min, x_max, nx, device=self.device)
+            y_coords = torch.linspace(y_min, y_max, ny, device=self.device)
+            heights = torch.zeros((nx, ny), device=self.device)
+            return heights, x_coords, y_coords
+        
+        # Get height field and metadata from terrain
+        terrain_geom = self.terrain.geoms[0]
+        height_field = terrain_geom.metadata["height_field"]
+        horizontal_scale = terrain_geom.metadata["horizontal_scale"]
+        vertical_scale = terrain_geom.metadata.get("vertical_scale", 0.005)
+        
+        # Get terrain position (offset)
+        # Try to get from morph, otherwise try entity position, otherwise default to (0, 0, 0)
+        try:
+            if hasattr(self.terrain, 'morph') and hasattr(self.terrain.morph, 'pos'):
+                terrain_pos = torch.tensor(self.terrain.morph.pos, device=self.device)
+            elif hasattr(self.terrain, '_morph') and hasattr(self.terrain._morph, 'pos'):
+                terrain_pos = torch.tensor(self.terrain._morph.pos, device=self.device)
+            else:
+                # Try to get from entity position
+                terrain_pos = self.terrain.get_pos()[0] if hasattr(self.terrain, 'get_pos') else torch.tensor([0.0, 0.0, 0.0], device=self.device)
+        except:
+            terrain_pos = torch.tensor([0.0, 0.0, 0.0], device=self.device)
+        
+        terrain_x_offset = terrain_pos[0]
+        terrain_y_offset = terrain_pos[1]
+        
+        # Use voxel_size if provided, otherwise use terrain's horizontal_scale
+        if voxel_size is None:
+            voxel_size = horizontal_scale
+        
+        # Create query grid
+        nx = int((x_max - x_min) / voxel_size) + 1
+        ny = int((y_max - y_min) / voxel_size) + 1
+        x_coords = torch.linspace(x_min, x_max, nx, device=self.device)
+        y_coords = torch.linspace(y_min, y_max, ny, device=self.device)
+        
+        # Convert world coordinates to height field indices
+        # Height field indices are relative to terrain position
+        x_indices = ((x_coords - terrain_x_offset) / horizontal_scale).clamp(0, height_field.shape[0] - 1)
+        y_indices = ((y_coords - terrain_y_offset) / horizontal_scale).clamp(0, height_field.shape[1] - 1)
+        
+        # Create meshgrid for interpolation
+        x_idx_grid, y_idx_grid = torch.meshgrid(x_indices, y_indices, indexing='ij')
+        
+        # Convert to integer indices for indexing
+        x_idx_floor = x_idx_grid.floor().long()
+        y_idx_floor = y_idx_grid.floor().long()
+        x_idx_ceil = (x_idx_floor + 1).clamp(0, height_field.shape[0] - 1)
+        y_idx_ceil = (y_idx_floor + 1).clamp(0, height_field.shape[1] - 1)
+        
+        # Get fractional parts for bilinear interpolation
+        x_frac = x_idx_grid - x_idx_floor.float()
+        y_frac = y_idx_grid - y_idx_floor.float()
+        
+        # Convert height field to tensor if needed
+        if isinstance(height_field, np.ndarray):
+            height_field_tensor = torch.tensor(height_field, dtype=gs.tc_float, device=self.device)
+        else:
+            height_field_tensor = height_field.to(self.device)
+        
+        # Bilinear interpolation
+        h00 = height_field_tensor[x_idx_floor, y_idx_floor]
+        h10 = height_field_tensor[x_idx_ceil, y_idx_floor]
+        h01 = height_field_tensor[x_idx_floor, y_idx_ceil]
+        h11 = height_field_tensor[x_idx_ceil, y_idx_ceil]
+        
+        # Interpolate
+        h0 = h00 * (1 - x_frac) + h10 * x_frac
+        h1 = h01 * (1 - x_frac) + h11 * x_frac
+        heights = h0 * (1 - y_frac) + h1 * y_frac
+        
+        # Convert from height field units to world coordinates
+        heights = heights * vertical_scale
+        
+        return heights, x_coords, y_coords
