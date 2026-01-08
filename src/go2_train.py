@@ -115,16 +115,19 @@ def get_cfgs():
         "ang_vel_shift_range": [-0.2, 0.2],
         "terrain_type": "active_noisy", # "plane" or "active_noisy"
         "terrain_noise_scale": 0.2,
-        "logger":"wandb",
-        "wandb_project":"rl locomotion"
+        #"logger":"Tensorboard",
+        #"wandb_project":"rl locomotion"
     }
     obs_cfg = {
+        "contact_sensors_binary_enable": True,
+
         "num_obs": 45,
         "obs_scales": {
             "lin_vel": 2.0,
             "ang_vel": 0.25,
             "dof_pos": 1.0,
-            "dof_vel": 0.05,
+            "dof_vel": 0.15,
+            "contact_sensors": 1.0, # 1.0 if contact sensors are enabled, 0.0 otherwise
         },
     }
     reward_cfg = {
@@ -141,10 +144,11 @@ def get_cfgs():
         },
     }
     command_cfg = {
-        "num_commands": 3,
+        "num_commands": 4,
         "lin_vel_x_range": [0.5, 0.5],
         "lin_vel_y_range": [0, 0],
         "ang_vel_range": [0, 0],
+        "height_range": [0.2, 0.4],
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg
