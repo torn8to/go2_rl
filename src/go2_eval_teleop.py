@@ -144,8 +144,9 @@ def main():
                 reset_jump_toggle_iter = 0
                     
             iter += 1
-            
-            
+            if iter % 10 == 0 :
+                print(env.sample_contacts())
+
             # Render the camera
             if env.cam_0 is not None:
                 rgb, _, _, _ = env.cam_0.render(

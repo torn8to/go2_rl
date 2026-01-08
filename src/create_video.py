@@ -23,22 +23,4 @@ if __name__ == "__main__":
         cv2.putText(image, 
                     f"Vx {command_buffer[0]}, Vy {comand_buffer[1]}, rZ {command_buffer[2]}",
                     (5,5), cv.FONT_HERSHEY_SIMPLEX, 4, (255,255,255), 2) 
-        out.write(img)
-
-
-
-
-
-    
-
-
-
-    
-
-    
-
-
-
-
-
-
+        c2.imshow(img)

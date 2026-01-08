@@ -56,7 +56,7 @@ class Go2Env:
         if self.env_cfg.get("terrain_type") == "active_noisy":
              self.terrain = self.scene.add_entity(
                 gs.morphs.Terrain(
-                    n_subterrains=(3, 3),
+                    n_subterrains=(5, 5),
                     subterrain_size=(10, 10),
                     pos=(-15, -15, 0),
                     horizontal_scale=0.25,
@@ -112,7 +112,6 @@ class Go2Env:
         if self.cam_0 is not None:
             self.cam_0.follow_entity(self.robot, smoothing=0.05)
 
-
         # names to indices
         self.motors_dof_idx = [self.robot.get_joint(name).dof_start for name in self.env_cfg["joint_names"]]
 
@@ -165,7 +164,10 @@ class Go2Env:
         self.commands[envs_idx, 0] = gs_rand_float(*self.command_cfg["lin_vel_x_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 1] = gs_rand_float(*self.command_cfg["lin_vel_y_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 2] = gs_rand_float(*self.command_cfg["ang_vel_range"], (len(envs_idx),), self.device)
-        self.commands[envs_idx, 3] = gs_rand_float(*self.command_cfg["height_range"], (len(envs_idx),), self.device)
+        if "height_range" in self.command_cfg.keys():
+            self.commands[envs_idx, 3] = gs_rand_float(*self.command_cfg["height_range"], (len(envs_idx),), self.device)
+        else:
+            self.commands[envs_idx, 3] = torch.ones(size=len(envs_idx), device = self.device) * 0.3
 
     def sample_contacts(self, envs_idx=None) -> torch.Tensor:
         """
@@ -189,22 +191,16 @@ class Go2Env:
             n_envs = self.num_envs if envs_idx is None else len(envs_idx) if isinstance(envs_idx, (list, tuple)) else 1
             return torch.zeros((n_envs, len(self.contact_links)), device=self.device, dtype=gs.tc_float)
         
-        # Read from all contact sensors
-        # Each sensor.read() returns shape (n_envs,) when envs_idx=None
         contact_data = []
         for sensor in self.contact_sensors:
-            contact = sensor.read(envs_idx=envs_idx)  # Shape: (n_envs,) or scalar if single env
-            # Ensure it's a tensor with proper shape
+            contact = sensor.read(envs_idx=envs_idx)
             if not isinstance(contact, torch.Tensor):
                 contact = torch.tensor(contact, device=self.device, dtype=gs.tc_float) * 1.0
-            # Handle single environment case
             if contact.dim() == 0:
                 contact = contact.unsqueeze(0)
             contact_data.append(contact)
         
-        # Stack along the links dimension: (n_envs, n_links)
-        contacts = torch.stack(contact_data, dim=-1)  # Shape: (n_envs, n_links)
-        
+        contacts = torch.stack(contact_data, dim=-1)
         return contacts
 
 
@@ -230,9 +226,8 @@ class Go2Env:
         self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
         self.dof_pos[:] = self.robot.get_dofs_position(self.motors_dof_idx)
         self.dof_vel[:] = self.robot.get_dofs_velocity(self.motors_dof_idx)
-        
         # Sample contact information (optional - can be called when needed)
-        # self.contact_buffers = self.sample_contacts()
+        self.contact_buffers = self.sample_contacts()
 
         # random pushes
         if self.episode_length_buf[0] % self.push_interval_steps == 0:
@@ -264,13 +259,15 @@ class Go2Env:
             self.rew_buf += rew
             self.episode_sums[name] += rew
 
+
+
         # compute observations
         self.obs_buf = torch.cat(
             [
                 (self.base_ang_vel + self.base_ang_vel_shift) * self.obs_scales["ang_vel"],  # 3
                 self.projected_gravity,  # 3
                 self.commands * self.commands_scale,  # 4
-                
+                self.contact_sensors * self.obs_scales["contact_sensor"], # 4
                 (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 12
                 self.dof_vel * self.obs_scales["dof_vel"],  # 12
                 self.actions,  # 12

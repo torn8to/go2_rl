@@ -120,8 +120,7 @@ def get_cfgs():
     }
     obs_cfg = {
         "contact_sensors_binary_enable": True,
-
-        "num_obs": 45,
+        "num_obs": 49, # 45 default  49 with contact sensors
         "obs_scales": {
             "lin_vel": 2.0,
             "ang_vel": 0.25,
@@ -145,7 +144,7 @@ def get_cfgs():
     }
     command_cfg = {
         "num_commands": 4,
-        "lin_vel_x_range": [0.5, 0.5],
+        "lin_vel_x_range": [0.5, 1.5],
         "lin_vel_y_range": [0, 0],
         "ang_vel_range": [0, 0],
         "height_range": [0.2, 0.4],
@@ -158,9 +157,11 @@ def main():
     parser.add_argument("-e", "--exp_name", type=str, default="go2-walking")
     parser.add_argument("-c", "--ckpt", type=int, default=-1)
     parser.add_argument("-B", "--num_envs", type=int, default=2048)
-    parser.add_argument("--max_iterations", type=int, default=15000)
+    parser.add_argument("--max_iterations", type=int, default=1500)
     parser.add_argument("--device", type=str, default="cuda:0", help="device to use: 'cpu' or 'cuda:0'")
-    parser.add_argument("--disable_noise", action="store_true", default=False, help="Disable noisy terrain and use a flat plane instead")
+    parser.add_argument("--random_terrain", action="store_false", help="Disable noisy terrain and use a flat plane instead")
+    #parser.add_argument("--disable-force", action="store_false", help="Disable push and rain and use a flat plane instead")
+    #parser.add_argument("--disable-random-friction", action="store_false", help="Disable push and rain and use a flat plane instead")
     args = parser.parse_args()
 
     backend = gs.constants.backend.gpu if args.device.lower() == "cuda:0" else gs.constants.backend.cpu
@@ -175,8 +176,6 @@ def main():
     if args.disable_push:
         env_cfg["push_interval_s"] = 0.0
 
-    if args.
-    
     train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
     if args.ckpt >= 1:
         train_cfg["resume"] = True
