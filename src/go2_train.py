@@ -34,8 +34,8 @@ def get_train_cfg(exp_name, max_iterations):
         "init_member_classes": {},
         "policy": {
             "activation": "elu",
-            "actor_hidden_dims": [512, 256, 128],
-            "critic_hidden_dims": [512, 256, 128],
+            "actor_hidden_dims": [512, 512, 256, 128],
+            "critic_hidden_dims": [512, 512, 256, 128],
             "init_noise_std": 1.0,
             "class_name": "ActorCritic",
         },
@@ -48,7 +48,7 @@ def get_train_cfg(exp_name, max_iterations):
             "record_interval": -1,
             "resume": False,
             "resume_path": None,
-            "logger":"wandb",
+            "logger":"Tensorboard",
             "wandb_project":"rl_locomotion",
             "run_name": "",
         },
@@ -108,19 +108,19 @@ def get_cfgs():
         "action_scale": 0.25,
         "simulate_action_latency": True,
         "clip_actions": 100.0,
-        "push_interval_s": 10.0,
+        "push_interval_s": 0.0,
         "push_vel_range": [-1.0, 1.0],
         # domain randomization
         "lin_vel_shift_range": [-0.1, 0.1],
         "ang_vel_shift_range": [-0.2, 0.2],
-        "terrain_type": "active_noisy", # "plane" or "active_noisy"
+        "terrain_type": "plane", # "plane" or "active_noisy"
         "terrain_noise_scale": 0.2,
-        #"logger":"Tensorboard",
+        "logger":"Tensorboard",
         #"wandb_project":"rl locomotion"
     }
     obs_cfg = {
         "contact_sensors_binary_enable": True,
-        "num_obs": 49, # 45 default  49 with contact sensors
+        "num_obs": 50, # 45 default  50 with contact sensors
         "obs_scales": {
             "lin_vel": 2.0,
             "ang_vel": 0.25,
@@ -131,11 +131,10 @@ def get_cfgs():
     }
     reward_cfg = {
         "tracking_sigma": 0.25,
-        "base_height_target": 0.3,
-        "feet_height_target": 0.1,
+        "feet_height_target": 0.075,
         "reward_scales": {
             "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.2,
+            "tracking_ang_vel": 0.4,
             "lin_vel_z": -1.0,
             "base_height": -50.0,
             "action_rate": -0.005,
@@ -143,10 +142,11 @@ def get_cfgs():
         },
     }
     command_cfg = {
-        "num_commands": 3,
-        "lin_vel_x_range": [0.5, 0.5],
-        "lin_vel_y_range": [0, 0],
-        "ang_vel_range": [0, 0],
+        "num_commands": 4,
+        "lin_vel_x_range": [-0.5, 1.0],
+        "lin_vel_y_range": [-0.5, 0.5],
+        "ang_vel_range": [-.3, .3],
+        "height_range": [0.2, 0.4],
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg
@@ -158,30 +158,31 @@ def main():
     parser.add_argument("-B", "--num_envs", type=int, default=2048)
     parser.add_argument("--max_iterations", type=int, default=1500)
     parser.add_argument("--device", type=str, default="cuda:0", help="device to use: 'cpu' or 'cuda:0'")
-    parser.add_argument("--random_terrain", action="store_false", help="Disable noisy terrain and use a flat plane instead")
+    parser.add_argument("--random_terrain", action="store_true", help="Flag for random terrain generation")
+    parser.add_argument("--enable_force", action="store_true", help="Flag for random terrain generation")
     #parser.add_argument("--disable-force", action="store_false", help="Disable push and rain and use a flat plane instead")
     #parser.add_argument("--disable-random-friction", action="store_false", help="Disable push and rain and use a flat plane instead")
     args = parser.parse_args()
 
     backend = gs.constants.backend.gpu if args.device.lower() == "cuda:0" else gs.constants.backend.cpu
-    print(backend)
     gs.init(logging_level="warning", backend=backend)
 
     log_dir = f"logs/{args.exp_name}"
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
-    if args.disable_noise:
-        env_cfg["terrain_type"] = "plane"
 
-    if args.disable_push:
-        env_cfg["push_interval_s"] = 0.0
+    if args.random_terrain:
+        env_cfg["terrain_type"] = "random_uniform"
+
+    if args.enable_force:
+        env_cfg["push_interval_s"] = 10.0
 
     train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
     if args.ckpt >= 1:
         train_cfg["resume"] = True
         resume_path=os.path.join("go2-walking-models",f"model_{args.ckpt}.pt")
-    else:
-        if os.path.exists(log_dir):
-            shutil.rmtree(log_dir)
+        
+    if os.path.exists(log_dir):
+        shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
 
     env = Go2Env(

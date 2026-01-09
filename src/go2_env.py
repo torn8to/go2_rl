@@ -2,9 +2,8 @@ import torch
 import math
 import numpy as np
 import genesis as gs
-from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
-import gstaichi as ti
 
+from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
 
 def gs_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
@@ -141,7 +140,8 @@ class Go2Env:
         self.episode_length_buf = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_int)
         self.commands = torch.zeros((self.num_envs, self.num_commands), device=self.device, dtype=gs.tc_float)
         self.commands_scale = torch.tensor(
-            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"], self.obs_scales["ang_vel"]],
+            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"],
+            self.obs_scales["ang_vel"], self.obs_scales["contact_sensors"]],
             device=self.device,
             dtype=gs.tc_float,
         )
@@ -157,6 +157,7 @@ class Go2Env:
             device=self.device,
             dtype=gs.tc_float,
         )
+        self.height_target_reward = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_float) # Initialize for all envs
         self.extras = dict()  # extra information for logging
         self.extras["observations"] = dict()
 
@@ -164,21 +165,20 @@ class Go2Env:
         self.commands[envs_idx, 0] = gs_rand_float(*self.command_cfg["lin_vel_x_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 1] = gs_rand_float(*self.command_cfg["lin_vel_y_range"], (len(envs_idx),), self.device)
         self.commands[envs_idx, 2] = gs_rand_float(*self.command_cfg["ang_vel_range"], (len(envs_idx),), self.device)
-        if "height_range" in self.command_cfg.keys():
-            self.commands[envs_idx, 3] = gs_rand_float(*self.command_cfg["height_range"], (len(envs_idx),), self.device)
-        else:
-            self.commands[envs_idx, 3] = torch.ones(size=len(envs_idx), device = self.device) * 0.3
+        self.commands[envs_idx, 3] = gs_rand_float(*self.command_cfg["height_range"], (len(envs_idx),), self.device)
+        self.height_target_reward[envs_idx] = self.commands[envs_idx, 3] # Update specific indices
+        # self.height_target_reward = self.commands[envs_idx, 3] # Original line that caused the error
 
     def sample_contacts(self, envs_idx=None) -> torch.Tensor:
         """
         Sample contact information from all contact sensors across environments.
-        
+
         Parameters
         ----------
         envs_idx : int, list, or None, optional
             Environment indices to query. If None, queries all environments.
             Defaults to None.
-        
+
         Returns
         -------
         torch.Tensor, shape (n_envs, n_links)
@@ -190,7 +190,7 @@ class Go2Env:
             # No contact sensors, return zeros
             n_envs = self.num_envs if envs_idx is None else len(envs_idx) if isinstance(envs_idx, (list, tuple)) else 1
             return torch.zeros((n_envs, len(self.contact_links)), device=self.device, dtype=gs.tc_float)
-        
+
         contact_data = []
         for sensor in self.contact_sensors:
             contact = sensor.read(envs_idx=envs_idx)
@@ -199,7 +199,7 @@ class Go2Env:
             if contact.dim() == 0:
                 contact = contact.unsqueeze(0)
             contact_data.append(contact)
-        
+
         contacts = torch.stack(contact_data, dim=-1)
         return contacts
 
@@ -260,14 +260,13 @@ class Go2Env:
             self.episode_sums[name] += rew
 
 
-
         # compute observations
         self.obs_buf = torch.cat(
             [
                 (self.base_ang_vel + self.base_ang_vel_shift) * self.obs_scales["ang_vel"],  # 3
                 self.projected_gravity,  # 3
                 self.commands * self.commands_scale,  # 4
-                self.contact_sensors * self.obs_scales["contact_sensor"], # 4
+                self.contact_buffers * self.obs_scales["contact_sensors"], # 4
                 (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 12
                 self.dof_vel * self.obs_scales["dof_vel"],  # 12
                 self.actions,  # 12
@@ -363,7 +362,7 @@ class Go2Env:
 
     def _reward_base_height(self):
         # Penalize base height away from target
-        return torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
+        return torch.square(self.base_pos[:, 2] - self.height_target_reward)
 
     def _apply_random_forces(self):
         random_vel = torch.rand((self.num_envs, 3), device=self.device) * (self.push_vel_range[1] - self.push_vel_range[0]) + self.push_vel_range[0]
@@ -374,11 +373,11 @@ class Go2Env:
     def query_terrain_heights(self, x_min, x_max, y_min, y_max, voxel_size=0.1):
         """
         Query terrain heights over a rectangular region.
-        
+
         This function samples the terrain height field over a specified rectangular
         region using bilinear interpolation. If no terrain exists (e.g., using a
         flat plane), it returns zeros.
-        
+
         Parameters
         ----------
         x_min, x_max : float
@@ -388,7 +387,7 @@ class Go2Env:
         voxel_size : float, optional
             Size of each voxel in meters. If None, uses the terrain's horizontal_scale.
             If specified, the region will be sampled at this resolution.
-        
+
         Returns
         -------
         heights : torch.Tensor, shape (nx, ny)
@@ -397,7 +396,7 @@ class Go2Env:
             X coordinates of each voxel center
         y_coords : torch.Tensor, shape (ny,)
             Y coordinates of each voxel center
-        
+
         Example
         -------
         >>> # Query a 2m x 2m region around the origin with 0.1m voxels
@@ -418,13 +417,13 @@ class Go2Env:
             y_coords = torch.linspace(y_min, y_max, ny, device=self.device)
             heights = torch.zeros((nx, ny), device=self.device)
             return heights, x_coords, y_coords
-        
+
         # Get height field and metadata from terrain
         terrain_geom = self.terrain.geoms[0]
         height_field = terrain_geom.metadata["height_field"]
         horizontal_scale = terrain_geom.metadata["horizontal_scale"]
         vertical_scale = terrain_geom.metadata.get("vertical_scale", 0.005)
-        
+
         # Get terrain position (offset)
         # Try to get from morph, otherwise try entity position, otherwise default to (0, 0, 0)
         try:
@@ -437,56 +436,56 @@ class Go2Env:
                 terrain_pos = self.terrain.get_pos()[0] if hasattr(self.terrain, 'get_pos') else torch.tensor([0.0, 0.0, 0.0], device=self.device)
         except:
             terrain_pos = torch.tensor([0.0, 0.0, 0.0], device=self.device)
-        
+
         terrain_x_offset = terrain_pos[0]
         terrain_y_offset = terrain_pos[1]
-        
+
         # Use voxel_size if provided, otherwise use terrain's horizontal_scale
         if voxel_size is None:
             voxel_size = horizontal_scale
-        
+
         # Create query grid
         nx = int((x_max - x_min) / voxel_size) + 1
         ny = int((y_max - y_min) / voxel_size) + 1
         x_coords = torch.linspace(x_min, x_max, nx, device=self.device)
         y_coords = torch.linspace(y_min, y_max, ny, device=self.device)
-        
+
         # Convert world coordinates to height field indices
         # Height field indices are relative to terrain position
         x_indices = ((x_coords - terrain_x_offset) / horizontal_scale).clamp(0, height_field.shape[0] - 1)
         y_indices = ((y_coords - terrain_y_offset) / horizontal_scale).clamp(0, height_field.shape[1] - 1)
-        
+
         # Create meshgrid for interpolation
         x_idx_grid, y_idx_grid = torch.meshgrid(x_indices, y_indices, indexing='ij')
-        
+
         # Convert to integer indices for indexing
         x_idx_floor = x_idx_grid.floor().long()
         y_idx_floor = y_idx_grid.floor().long()
         x_idx_ceil = (x_idx_floor + 1).clamp(0, height_field.shape[0] - 1)
         y_idx_ceil = (y_idx_floor + 1).clamp(0, height_field.shape[1] - 1)
-        
+
         # Get fractional parts for bilinear interpolation
         x_frac = x_idx_grid - x_idx_floor.float()
         y_frac = y_idx_grid - y_idx_floor.float()
-        
+
         # Convert height field to tensor if needed
         if isinstance(height_field, np.ndarray):
             height_field_tensor = torch.tensor(height_field, dtype=gs.tc_float, device=self.device)
         else:
             height_field_tensor = height_field.to(self.device)
-        
+
         # Bilinear interpolation
         h00 = height_field_tensor[x_idx_floor, y_idx_floor]
         h10 = height_field_tensor[x_idx_ceil, y_idx_floor]
         h01 = height_field_tensor[x_idx_floor, y_idx_ceil]
         h11 = height_field_tensor[x_idx_ceil, y_idx_ceil]
-        
+
         # Interpolate
         h0 = h00 * (1 - x_frac) + h10 * x_frac
         h1 = h01 * (1 - x_frac) + h11 * x_frac
         heights = h0 * (1 - y_frac) + h1 * y_frac
-        
+
         # Convert from height field units to world coordinates
         heights = heights * vertical_scale
-        
+
         return heights, x_coords, y_coords
